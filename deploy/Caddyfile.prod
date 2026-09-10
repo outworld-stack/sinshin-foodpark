@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PRODUCTION Caddyfile (real cloud server).
+#
+# Usage:
+#   1. Put this file on the server (or keep in repo + bind-mount it)
+#   2. Export env before `docker compose up`:
+#        DOMAIN=food.example.com
+#        ACME_EMAIL=you@example.com
+#   3. Caddy obtains & renews Let's Encrypt/ZeroSSL certs automatically.
+#
+# Load-balancing for future api replicas — just list more upstreams:
+#   reverse_proxy api1:3000 api2:3000 { ... }
+# ─────────────────────────────────────────────────────────────────────────────
+{
+    email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
+    handle /api/* {
+        reverse_proxy {$API_UPSTREAMS:api:3000} {
+            flush_interval -1
+            lb_policy round_robin
+            health_uri /api/health
+            health_interval 5s
+        }
+    }
+
+    handle {
+        reverse_proxy {$WEB_UPSTREAMS:web:3000}
+    }
+}

@@ -1,0 +1,7 @@
+# ── Root (orchestration only — each app has its own .gitignore too) ──
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store

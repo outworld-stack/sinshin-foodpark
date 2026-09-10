@@ -1,0 +1,31 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Local "live server" simulation.
+#
+# Caddy automatically issues an internal-CA certificate for *.localhost
+# and serves real HTTPS on https://sinshin.localhost
+#
+# First run: browser will warn about the self-signed cert.
+# Trust it permanently (see README → "Trust the local CA"), or click through.
+# ─────────────────────────────────────────────────────────────────────────────
+sinshin.localhost {
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
+    # Backend API (Elysia). flush_interval -1 = stream immediately → SSE works.
+    handle /api/* {
+        reverse_proxy api:3000 {
+            flush_interval -1
+        }
+    }
+
+    # Frontend (TanStack Start SSR server)
+    handle {
+        reverse_proxy web:3000
+    }
+}

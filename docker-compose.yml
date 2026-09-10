@@ -1,0 +1,49 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Sinshin FoodPark — Layer 1: Orchestrator
+#
+# Full "live server simulation" on your machine:
+#   Caddy (TLS edge)  →  api (Elysia/Bun)  →  PostgreSQL 18.6 + Redis 8
+#                     →  web (TanStack Start SSR)
+#
+# Usage:
+#   docker network create sinshin_edge      # one-time (make setup)
+#   docker compose up --build -d            # bring everything up
+#
+# Each app keeps its OWN compose file (Layer 2) and can run standalone:
+#   cd apps/api  && docker compose up --build     # backend only
+#   cd apps/web  && docker compose up --build     # frontend only
+#
+# Hot-reload development mode (vite --host / bun --hot):
+#   docker compose --profile dev up --build
+# ─────────────────────────────────────────────────────────────────────────────
+name: sinshin
+
+include:
+  - apps/api/docker-compose.yml # api + postgres + redis
+  - apps/web/docker-compose.yml # web (SSR)
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    container_name: sinshin-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # local CA + (on server) ACME certs
+      - caddy_config:/config
+    networks:
+      - sinshin_edge
+
+networks:
+  # Shared edge network — the ONLY network containers reachable from the proxy.
+  # Future load balancer / extra api replicas join this network too.
+  sinshin_edge:
+    name: sinshin_edge
+    external: true
+
+volumes:
+  caddy_data:
+  caddy_config:
