@@ -1,16 +1,21 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # apps/web — Layer 2: frontend compose (can run standalone)
 #
-#   cd apps/web && docker compose up --build        # prod-like (runtime)
-#   cd apps/web && docker compose --profile dev up  # vite dev + HMR
+#   cd apps/web && docker compose --profile prod up --build   # runtime SSR server
+#   cd apps/web && docker compose --profile dev up --build    # vite dev + HMR
+#
+# ⚠ `web` carries profile "prod" ON PURPOSE: services WITHOUT a profile are
+#   started by EVERY `up` command — this profile is what keeps the two run
+#   modes from ever running together.
 #
 # The dev container carries the `web` network alias — after
-# `docker compose stop web` Caddy routes straight into the dev server.
+# `docker compose --profile prod stop` Caddy routes straight into the dev server.
 # ─────────────────────────────────────────────────────────────────────────────
 name: sinshin-web
 
 services:
   web:
+    profiles: ["prod"]
     build:
       context: .
       dockerfile: Dockerfile

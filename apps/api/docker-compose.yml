@@ -1,8 +1,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # apps/api — Layer 2: backend compose (can run standalone)
 #
-#   cd apps/api && docker compose up --build            # api + postgres + redis
-#   cd apps/api && docker compose --profile dev up      # + hot-reload api-dev
+#   cd apps/api && docker compose --profile prod up --build   # api + postgres + redis
+#   cd apps/api && docker compose --profile dev up --build    # api-dev + postgres + redis
+#
+# ⚠ `api` carries profile "prod" ON PURPOSE: services WITHOUT a profile are
+#   started by EVERY `up` command, so a bare `--profile dev up` used to start
+#   the production container too (the "all 7 containers at once" bug).
+#   With this profile the two modes can never run together.
 #
 # Topology:
 #   sinshin_edge      (external)  ← Caddy / future LB see ONLY `api`
@@ -12,6 +17,7 @@ name: sinshin-api
 
 services:
   api:
+    profiles: ["prod"]
     build:
       context: .
       dockerfile: Dockerfile
@@ -79,6 +85,8 @@ services:
       TZ: Asia/Tehran
     volumes:
       - pg_data:/var/lib/postgresql
+    ports:
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sinshin -d sinshin"]
       interval: 5s
