@@ -16,6 +16,10 @@ sinshin.localhost {
         Referrer-Policy strict-origin-when-cross-origin
         -Server
     }
+    #remove before real prod
+    handle /swagger* {
+        reverse_proxy api:3000
+    }
 
     # Backend API (Elysia). flush_interval -1 = stream immediately → SSE works.
     handle /api/* {
