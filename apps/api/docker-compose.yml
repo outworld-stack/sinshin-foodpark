@@ -37,6 +37,9 @@ services:
       start_period: 10s
 
   # Hot-reload API — same networks, direct port on localhost for debugging.
+  # APP_ENV is FORCED to development here: `docker compose --profile dev up`
+  # always means device rules OFF + OTP visible in response, no matter what
+  # apps/api/.env says — the two run modes can never be confused again.
   api-dev:
     profiles: ["dev"]
     build:
@@ -52,6 +55,8 @@ services:
     environment:
       TZ: Asia/Tehran
       NODE_ENV: development
+      APP_ENV: development
+      DEVICE_ENFORCEMENT: "off"
     ports:
       - "127.0.0.1:3010:3000"
     networks:

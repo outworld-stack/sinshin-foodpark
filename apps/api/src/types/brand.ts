@@ -23,6 +23,10 @@ export type ConditionId = Brand<string, "ConditionId">;
 export type ProductId = Brand<string, "ProductId">;
 export type AddressId = Brand<string, "AddressId">;
 export type SessionToken = Brand<string, "SessionToken">;
+export type SessionId = Brand<string, "SessionId">;
+export type DeviceId = Brand<string, "DeviceId">;
+export type DeviceFingerprint = Brand<string, "DeviceFingerprint">;
+export type ReferralCode = Brand<string, "ReferralCode">;
 
 /** Sanctioned cast points — grep for these to audit every boundary. */
 export const asUserId = (v: string): UserId => v as UserId;
@@ -31,5 +35,9 @@ export const asCampaignId = (v: string): CampaignId => v as CampaignId;
 export const asConditionId = (v: string): ConditionId => v as ConditionId;
 export const asProductId = (v: string): ProductId => v as ProductId;
 export const asAddressId = (v: string): AddressId => v as AddressId;
-export const asSessionToken = (v: string): SessionToken =>
-  v as SessionToken;
+export const asSessionToken = (v: string): SessionToken => v as SessionToken;
+export const asSessionId = (v: string): SessionId => v as SessionId;
+export const asDeviceId = (v: string): DeviceId => v as DeviceId;
+export const asDeviceFingerprint = (v: string): DeviceFingerprint =>
+  v as DeviceFingerprint;
+export const asReferralCode = (v: string): ReferralCode => v as ReferralCode;
