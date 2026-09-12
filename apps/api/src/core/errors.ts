@@ -1,52 +1,60 @@
-/**
- * Domain error hierarchy → mapped to HTTP responses by one Elysia onError.
- * Services throw these; controllers never shape error payloads by hand.
- */
-export abstract class AppError extends Error {
-  abstract readonly status: number;
-  abstract readonly code: string;
+export type AppErrorCode =
+  | 'VALIDATION_ERROR'
+  | 'UNAUTHORIZED'
+  | 'FORBIDDEN'
+  | 'NOT_FOUND'
+  | 'CONFLICT'
+  | 'RATE_LIMITED'
+  | 'DEVICE_LIMIT_REACHED'
+  | 'BANNED'
+  | 'INTERNAL_ERROR'
 
-  constructor(message: string) {
-    super(message);
-    this.name = new.target.name;
+export class AppError extends Error {
+  constructor(
+    readonly code: AppErrorCode,
+    message: string,
+    readonly status: number,
+    readonly details?: unknown,
+  ) {
+    super(message)
+    this.name = 'AppError'
   }
-
-  toJSON() {
-    return { error: { code: this.code, message: this.message } };
-  }
 }
 
-export class ValidationError extends AppError {
-  readonly status = 422;
-  readonly code = "VALIDATION_ERROR";
-}
+export const Err = {
+  validation: (msg = 'ورودی ارسالی معتبر نیست.', details?: unknown) =>
+    new AppError('VALIDATION_ERROR', msg, 422, details),
 
-export class UnauthorizedError extends AppError {
-  readonly status = 401;
-  readonly code = "UNAUTHORIZED";
-}
+  unauthorized: (msg = 'ابتدا وارد حساب کاربری خود شوید.') =>
+    new AppError('UNAUTHORIZED', msg, 401),
 
-export class ForbiddenError extends AppError {
-  readonly status = 403;
-  readonly code = "FORBIDDEN";
-}
+  forbidden: (msg = 'دسترسی لازم برای این عملیات را ندارید.') =>
+    new AppError('FORBIDDEN', msg, 403),
 
-export class NotFoundError extends AppError {
-  readonly status = 404;
-  readonly code = "NOT_FOUND";
-}
+  notFound: (msg = 'موردی پیدا نشد.') => new AppError('NOT_FOUND', msg, 404),
 
-export class ConflictError extends AppError {
-  readonly status = 409;
-  readonly code = "CONFLICT";
-}
+  conflict: (msg = 'این مورد از قبل وجود دارد.') =>
+    new AppError('CONFLICT', msg, 409),
 
-export class TooManyRequestsError extends AppError {
-  readonly status = 429;
-  readonly code = "TOO_MANY_REQUESTS";
-}
+  rateLimited: (
+    msg = 'تعداد درخواست‌ها زیاد است؛ کمی بعد دوباره تلاش کنید.',
+    retryAfterSeconds?: number,
+  ) =>
+    new AppError(
+      'RATE_LIMITED',
+      msg,
+      429,
+      retryAfterSeconds !== undefined ? { retryAfterSeconds } : undefined,
+    ),
 
-export class ExternalServiceError extends AppError {
-  readonly status = 502;
-  readonly code = "EXTERNAL_SERVICE_ERROR";
+  deviceLimit: (max: number) =>
+    new AppError(
+      'DEVICE_LIMIT_REACHED',
+      `حداکثر ${max} دستگاه مجاز است. برای افزودن دستگاه جدید، یکی از دستگاه‌های قبلی را حذف کنید.`,
+      409,
+      { max },
+    ),
+
+  banned: (msg = 'حساب کاربری شما مسدود شده است.') =>
+    new AppError('BANNED', msg, 403),
 }

@@ -1,99 +1,27 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# apps/api — Layer 2: backend compose (can run standalone)
-#
-#   cd apps/api && docker compose --profile prod up --build   # api + postgres + redis
-#   cd apps/api && docker compose --profile dev up --build    # api-dev + postgres + redis
-#
-# ⚠ `api` carries profile "prod" ON PURPOSE: services WITHOUT a profile are
-#   started by EVERY `up` command, so a bare `--profile dev up` used to start
-#   the production container too (the "all 7 containers at once" bug).
-#   With this profile the two modes can never run together.
-#
-# Topology:
-#   sinshin_edge      (external)  ← Caddy / future LB see ONLY `api`
-#   sinshin_internal  (private)   ← postgres & redis are NOT reachable from edge
-# ─────────────────────────────────────────────────────────────────────────────
-name: sinshin-api
+# ─────────────────────────────────────────────
+#  apps/api/docker-compose.yml
+#  اجرا فقط از ریشه‌ی پروژه و با یکی از این دو حالت:
+#    DEV :  docker compose --profile dev  up -d --build
+#    PROD:  docker compose --profile prod up -d --build
+#  (بدون --profile فقط زیرساخت بالا می‌آید — استفاده نکن)
+# ─────────────────────────────────────────────
 
 services:
-  api:
-    profiles: ["prod"]
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runtime
-    image: sinshin/api
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      TZ: Asia/Tehran
-    networks:
-      - sinshin_edge
-      - sinshin_internal
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "bun -e 'const r = await fetch(\"http://127.0.0.1:3000/api/health\"); if (!r.ok) process.exit(1)'"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
-  # Hot-reload API — same networks, direct port on localhost for debugging.
-  # APP_ENV is FORCED to development here: `docker compose --profile dev up`
-  # always means device rules OFF + OTP visible in response, no matter what
-  # apps/api/.env says — the two run modes can never be confused again.
-  api-dev:
-    profiles: ["dev"]
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: dev
-    image: sinshin/api:dev
-    restart: unless-stopped
-    volumes:
-      - ./src:/app/src
-      - ./drizzle:/app/drizzle
-    env_file: .env
-    environment:
-      TZ: Asia/Tehran
-      NODE_ENV: development
-      APP_ENV: development
-      DEVICE_ENFORCEMENT: "off"
-    ports:
-      - "127.0.0.1:3010:3000"
-    networks:
-      sinshin_edge:
-        aliases: ["api"] # Caddy target while the prod-like `api` is stopped
-      sinshin_internal: {}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+  # ── زیرساخت مشترک (در هر دو حالت روشن) ──
 
   postgres:
     image: postgres:18.6-alpine
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: sinshin
-      POSTGRES_PASSWORD: sinshin_local # local sim only — override on the server
-      POSTGRES_DB: sinshin
-      TZ: Asia/Tehran
+    env_file: .env
     volumes:
       - pg_data:/var/lib/postgresql
-    ports:
-      - "127.0.0.1:5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sinshin -d sinshin"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
     networks:
-      - sinshin_internal
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
   redis:
     image: redis:8-alpine
@@ -101,20 +29,79 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
+    networks:
+      - internal
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 12
-    networks:
-      - sinshin_internal
 
-networks:
-  sinshin_edge:
-    name: sinshin_edge
-    external: true
-  sinshin_internal: {}
+  # ── حالت production (فقط با --profile prod) ──
+
+  api:
+    profiles: ["prod"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      APP_ENV: production
+      PORT: "3000"
+      REDIS_URL: redis://redis:6379
+      DEVICE_ENFORCEMENT: "on"   # برای تست prod بدون محدودیت دستگاه، موقتاً «off» کن
+    networks:
+      - edge
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── حالت development (فقط با --profile dev) ──
+
+  api-dev:
+    profiles: ["dev"]
+    image: oven/bun:1.2
+    working_dir: /app
+    command: sh -c "bun install && bun run dev"
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      APP_ENV: development
+      PORT: "3000"
+      REDIS_URL: redis://redis:6379
+      DEVICE_ENFORCEMENT: "off"  # در dev محدودیت دستگاه غیرفعال است
+    volumes:
+      - .:/app
+      - api_dev_node_modules:/app/node_modules
+    ports:
+      - "127.0.0.1:3010:3000"   # دسترسی مستقیم فقط از خود سیستم: http://localhost:3010
+    networks:
+      edge:
+        aliases:
+          - api                  # caddy در هر دو حالت به نام «api» وصل می‌شود
+      internal: {}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
-  pg_data: {}
-  redis_data: {}
+  pg_data:
+    name: sinshin_pg_data
+  redis_data:
+    name: sinshin_redis_data
+  api_dev_node_modules:
+    name: sinshin_api_dev_node_modules
+
+networks:
+  edge:
+    name: sinshin_edge
+    external: true
+  internal:
+    name: sinshin_internal
+    internal: true

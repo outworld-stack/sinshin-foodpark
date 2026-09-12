@@ -1,15 +1,13 @@
-import { defineConfig } from "drizzle-kit";
+import { defineConfig } from 'drizzle-kit'
+
+const url = process.env.DATABASE_URL
+if (!url) {
+  throw new Error('DATABASE_URL تنظیم نشده است — در کانتینر از env_file تامین می‌شود')
+}
 
 export default defineConfig({
-  dialect: "postgresql",
-  schema: "./src/db/schema",
-  out: "./drizzle",
-  // Inside the container: postgres host. Outside (host tools): localhost.
-  dbCredentials: {
-    url:
-      process.env.DATABASE_URL ??
-      "postgres://sinshin:sinshin_local@localhost:5432/sinshin",
-  },
-  verbose: true,
-  strict: true,
-});
+  dialect: 'postgresql',
+  schema: './src/db/schema',
+  out: './drizzle',
+  dbCredentials: { url },
+})
