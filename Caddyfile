@@ -1,34 +1,53 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Local "live server" simulation.
+# Caddy — یک فایل برای هر دو حالت؛ آدرس سایت از متغیر DOMAIN می‌آید
+# (سرویس caddy در docker-compose.yml تامینش می‌کند).
 #
-# Caddy automatically issues an internal-CA certificate for *.localhost
-# and serves real HTTPS on https://sinshin.localhost
-#
-# First run: browser will warn about the self-signed cert.
-# Trust it permanently (see README → "Trust the local CA"), or click through.
+#   لوکال:  DOMAIN=sinshin.localhost  → گواهی از CA داخلی (https خودکار)
+#   سرور:   DOMAIN=food.example.com   → گواهی ACME (Let's Encrypt) خودکار
 # ─────────────────────────────────────────────────────────────────────────────
-sinshin.localhost {
+{
+    # ایمیل اکانت ACME — فقط برای دامنه‌ی واقعی مصرف می‌شود؛
+    # برای آدرس‌های *.localhost کدی اصلاً سراغ ACME نمی‌رود.
+    email {$ACME_EMAIL:dev@sinshin.localhost}
+}
+
+{$DOMAIN:sinshin.localhost} {
     encode zstd gzip
 
     header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-Content-Type-Options nosniff
         X-Frame-Options DENY
         Referrer-Policy strict-origin-when-cross-origin
         -Server
     }
-    #remove before real prod
+
+    # ── مستندات API — فقط وقتی SWAGGER_ENABLED=true ──
+    # نکته: پکیج مستندسازی نصب‌شده مسیرش /openapi است (نه /swagger که
+    # کد فعلی ادعا می‌کند)؛ فعلاً هر دو مسیر روت شده‌اند تا بعد از
+    # صریح‌کردن مسیر در کد اپ، هر کدام بود کار کند.
+    @docs_on expression `'{$SWAGGER_ENABLED:false}' == "true"`
     handle /swagger* {
-        reverse_proxy api:3000
+        route {
+            reverse_proxy @docs_on api:3000
+            respond 404
+        }
+    }
+    handle /openapi* {
+        route {
+            reverse_proxy @docs_on api:3000
+            respond 404
+        }
     }
 
-    # Backend API (Elysia). flush_interval -1 = stream immediately → SSE works.
+    # ── بک‌اند — flush_interval -1 یعنی stream فوری → SSE سالم ──
     handle /api/* {
         reverse_proxy api:3000 {
             flush_interval -1
         }
     }
 
-    # Frontend (TanStack Start SSR server)
+    # ── فرانت (TanStack Start SSR) ──
     handle {
         reverse_proxy web:3000
     }

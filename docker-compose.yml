@@ -1,28 +1,21 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Sinshin FoodPark — Layer 1: Orchestrator
+# Sinshin FoodPark — تک‌فایل استقرار (شبیه‌ساز لوکال + سرور واقعی)
 #
-# Full "live server simulation" on your machine:
-#   Caddy (TLS edge)  →  api (Elysia/Bun)  →  PostgreSQL 18.6 + Redis 8
-#                     →  web (TanStack Start SSR)
+#   docker compose up -d --build
+#     ← کل استک: caddy + migrate + api + web + postgres + redis
 #
-# Usage:
-#   docker network create sinshin_edge      # one-time (make setup)
-#   docker compose up --build -d            # bring everything up
+#   سایت:  https://sinshin.localhost   (گواهی از CA داخلی کدی)
 #
-# Each app keeps its OWN compose file (Layer 2) and can run standalone:
-#   cd apps/api  && docker compose up --build     # backend only
-#   cd apps/web  && docker compose up --build     # frontend only
+# توسعه‌ی روزمره (اپ روی خود سیستم، فقط زیرساخت در کانتینر):
+#   docker compose -f docker-compose.dev.yml up -d
 #
-# Hot-reload development mode (vite --host / bun --hot):
-#   docker compose --profile dev up --build
+# ⚠ قبلاً سه فایل کامپوز داشتیم (root + apps/api + apps/web با include).
+#   حالا فقط همین یک فایل + یک فایل dev. آن دو فایل حذف شده‌اند.
 # ─────────────────────────────────────────────────────────────────────────────
 name: sinshin
 
-include:
-  - apps/api/docker-compose.yml # api + postgres + redis
-  - apps/web/docker-compose.yml # web (SSR)
-
 services:
+  # ── لبه: TLS + Reverse Proxy ─────────────────────────────────────────────
   caddy:
     image: caddy:2.10-alpine
     container_name: sinshin-caddy
@@ -30,20 +23,136 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      # آدرس سایت — از .env ریشه می‌آید؛ روی سرور دامنه‌ی واقعی را بگذار
+      DOMAIN: ${DOMAIN:-sinshin.localhost}
+      # ایمیل اکانت ACME — فقط برای دامنه‌ی واقعی مصرف می‌شود
+      ACME_EMAIL: ${ACME_EMAIL:-dev@sinshin.localhost}
+      # مستندات API از بیرون دیده شود؟ روی سرور حتماً false
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-false}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data # local CA + (on server) ACME certs
+      - caddy_data:/data # CA محلی (لوکال) / گواهی‌های ACME (سرور)
       - caddy_config:/config
     networks:
-      - sinshin_edge
+      - edge
 
-networks:
-  # Shared edge network — the ONLY network containers reachable from the proxy.
-  # Future load balancer / extra api replicas join this network too.
-  sinshin_edge:
-    name: sinshin_edge
-    external: true
+  # ── بک‌اند (Elysia + Bun) ────────────────────────────────────────────────
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+      target: runtime
+    image: sinshin/api
+    container_name: sinshin-api
+    restart: unless-stopped
+    env_file: ./apps/api/.env # مخفی‌های اپ: JWT_SECRET و ستون‌ها و آدرس‌ها
+    environment:
+      # override های حالت docker — مقادیر داخل .env مالِ dev روی سیستم است
+      APP_ENV: production
+      PORT: "3000"
+      SITE_URL: https://${DOMAIN:-sinshin.localhost}
+      DEVICE_ENFORCEMENT: "on" # برای تست prod بدون محدودیت دستگاه، موقتاً «off» کن
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # این مسیر واقعاً DB و Redis را چک می‌کند (کد زنده در index.ts)
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.status < 500 ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    networks:
+      - edge
+      - internal
+
+  # ── فرانت (TanStack Start SSR) ───────────────────────────────────────────
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      target: runtime
+    image: sinshin/web
+    container_name: sinshin-web
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Tehran
+      PORT: "3000"
+      HOST: 0.0.0.0
+      # فقط سمت سرور (server functions / Eden SSR) — آدرس داخل شبکه‌ی داکر
+      API_URL: http://api:3000
+    depends_on:
+      - api
+    networks:
+      - edge
+
+  # ── یک‌بارمصرف: مهاجرت دیتابیس، قبل از بالا آمدن api ─────────────────────
+  # drizzle-kit بر اساس journal خودش idempotent است؛ هر up سریع no-op می‌شود.
+  migrate:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+      target: migrate
+    image: sinshin/api:migrate
+    container_name: sinshin-migrate
+    env_file: ./apps/api/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - internal
+
+  # ── دیتابیس ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:18.6-alpine
+    container_name: sinshin-postgres
+    restart: unless-stopped
+    env_file: ./apps/api/.env # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
+    volumes:
+      - pg_data:/var/lib/postgresql
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # ── کش / OTP ─────────────────────────────────────────────────────────────
+  redis:
+    image: redis:8-alpine
+    container_name: sinshin-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
 volumes:
+  pg_data:
+    name: sinshin_pg_data # همان نام قدیمی → دیتای موجود حفظ می‌شود
+  redis_data:
+    name: sinshin_redis_data # همان نام قدیمی → دیتای موجود حفظ می‌شود
   caddy_data:
+    name: sinshin_caddy_data # CA محلی → اعتمادِ داده‌شده به مرورگر حفظ می‌شود
   caddy_config:
+    name: sinshin_caddy_config
+
+networks:
+  # تنها شبکه‌ی قابل‌دسترس از پروکسی — کدی و api و web اینجا هستند
+  edge:
+    name: sinshin-edge
+  # شبکه‌ی بسته — فقط api ↔ postgres ↔ redis؛ هیچ خروجی به اینترنت ندارد
+  internal:
+    name: sinshin-internal
+    internal: true

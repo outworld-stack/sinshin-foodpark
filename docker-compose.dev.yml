@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# حالت توسعه‌ی روزمره — فقط زیرساخت (postgres + redis) روی localhost.
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#
+# بعدش اپ‌ها روی خود سیستم (HMR آنی، دیباگر، drizzle-kit مستقیم):
+#   apps/api →  bun run dev     (پورت 3000)
+#   apps/web →  bun run dev     (پورت 3001)
+#
+# ⚠ آدرس‌های localhost برای اپ، از فایل apps/api/.env.local تامین می‌شود
+#   (دستور ساختش در apps/api/.env.example نوشته شده).
+#
+# ⚠ دیتای این حالت از دیتای شبیه‌سازی prod جدا است (volume های مستقل).
+# ─────────────────────────────────────────────────────────────────────────────
+name: sinshin-dev
+
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    restart: unless-stopped
+    env_file: ./apps/api/.env # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
+    volumes:
+      - pg_data:/var/lib/postgresql
+    ports:
+      - "127.0.0.1:5432:5432" # فقط از خود سیستم — psql / drizzle studio / TablePlus
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379" # فقط از خود سیستم — redis-cli / ابزار مانیتورینگ
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  pg_data: # → sinshin-dev_pg_data (جدا از sinshin_pg_data حالت prod)
+  redis_data: # → sinshin-dev_redis_data
