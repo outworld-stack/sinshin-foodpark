@@ -7,6 +7,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import { useThemeStore } from '#/stores/themeStore'
 import { useEffect } from 'react'
 import { captureRefFromUrl } from '#/utils/referralCapture'
+import { initSession } from '#/integrations/api/eden'
 
 interface MyRouterContext {
   queryClient: QueryClient
@@ -40,6 +41,7 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 function RootDocument({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     captureRefFromUrl()
+    initSession()
     // استورها سطح ماژول زنده شدن — اینجا فقط کلاس تم سینک می‌شه
     const isDark = useThemeStore.getState().isDark
     document.documentElement.classList.toggle('dark', isDark)

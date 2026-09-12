@@ -1,260 +1,189 @@
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { and, desc, eq, isNull } from 'drizzle-orm'
 
 import { db } from '../../db'
-import {
-  devices,
-  sessions,
-  users,
-  type DeviceRow,
-  type SessionRow,
-  type UserRow,
-} from '../../db/schema'
-import { randomToken, sha256 } from '../../core/crypto'
-import { env } from '../../core/env'
+import { devices, users, type UserRow } from '../../db/schema'
+import { env, isSuperAdmin } from '../../core/env'
 import { Err } from '../../core/errors'
-import { signAccessToken } from '../../core/jwt'
-import { redis } from '../../core/redis'
+import { sendOtp, verifyOtp } from './otp.service'
+import { createSession, type DeviceInput, type SessionIssue } from './session.service'
 
-const SESSION_TTL_SECONDS = env.sessionTtlDays * 24 * 60 * 60
-/** پنجره‌ی تشخیص استفاده‌ی مجدد از توکنی که قبلاً rotate شده */
-const REUSE_WINDOW_SECONDS = env.accessTokenTtlMinutes * 60 + 300
 
-const usedRtKey = (hash: string) => `usedrt:${hash}`
-
-export interface DeviceInput {
-  fingerprint: string
-  name?: string
-  platform?: string
-  userAgent?: string | null
+export interface PublicUser {
+  id: string
+  phone: string
+  name: string | null
+  role: string
+  referralCode: string | null
+  createdAt: Date
+  lastLoginAt: Date | null
 }
 
-export interface SessionIssue {
-  accessToken: string
-  refreshToken: string
-  user: UserRow
-  session: SessionRow
-  device: DeviceRow
+export function publicUser(u: UserRow): PublicUser {
+  return {
+    id: u.id,
+    phone: u.phone,
+    name: u.name,
+    role: u.role,
+    referralCode: u.referralCode,
+    createdAt: u.createdAt,
+    lastLoginAt: u.lastLoginAt,
+  }
+}
+
+export function requestOtp(phone: string) {
+  return sendOtp(phone)
+}
+
+/** گزینه‌های ورود — حلقه‌ی معرفی و پذیرش قوانین (فقط برای ثبت‌نام معنا دارد) */
+export interface LoginOptions {
+  /** کد معرفی که کاربر از لینک ?ref=... آورده */
+  refCode?: string | null
+  /** کاربر جدید باید قوانین را پذیرفته باشد */
+  termsAccepted?: boolean
+  /** نسخه‌ی قوانینی که فرانت به کاربر نشان داده (مثل "1") */
+  termsVersion?: string | null
+}
+
+// الفبای بدون حروف گیج‌کننده (I و L و O و 0 و 1 حذف) — کد معرف مثل SIN-4KD9PA
+const REF_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+
+function randomReferralCode(len: number): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(len))
+  let s = ''
+  for (const b of bytes) s += REF_ALPHABET[b % REF_ALPHABET.length]
+  return `SIN-${s}`
+}
+
+/** کد معرف یکتا می‌سازد — در برخورد نادر، دوباره تلاش می‌کند */
+async function generateUniqueReferralCode(): Promise<string> {
+  for (let i = 0; i < 5; i++) {
+    const code = i < 4 ? randomReferralCode(6) : randomReferralCode(10)
+    const clash = await db.query.users.findFirst({ where: eq(users.referralCode, code) })
+    if (!clash) return code
+  }
+  // عملاً ناممکن — فالبک زمان‌محور که همیشه یکتاست
+  return `SIN-${Date.now().toString(36).toUpperCase()}`
+}
+
+/** چکِ سبکِ قبل از ارسال کد — بدون هزینه‌ی پیامک (قرارداد checkIsNewUser فرانت) */
+export async function checkPhone(phone: string): Promise<{
+  isNewUser: boolean
+  needsTerms: boolean
+  role: string | null
+}> {
+  const user = await db.query.users.findFirst({ where: eq(users.phone, phone) })
+  if (!user) return { isNewUser: true, needsTerms: true, role: null }
+  return {
+    isNewUser: false,
+    // کاربرِ قدیمی که هنوز قوانین را نپذیرفته (رکوردهای قبل از این نسخه)
+    needsTerms: user.termsAcceptedAt === null,
+    role: user.role,
+  }
 }
 
 /**
- * ورود: نشست جدید می‌سازد.
- * قاعده: یک دستگاه = حداکثر یک نشست فعال → با ورود مجدد، نشست قبلی همان
- * دستگاه باطل می‌شود (relogin).
+ * ورود با OTP:
+ *  ۱) کد چک می‌شود
+ *  ۲) کاربر پیدا یا ساخته می‌شود (شماره‌های SUPER_ADMIN_PHONES نقش superadmin می‌گیرند)
+ *  ۳) سهمیه‌ی دستگاه چک می‌شود (ابرمدیرها معاف‌اند)
+ *  ۴) نشست ساخته می‌شود
+ *
+ * ثبت‌نام کاربر جدید بدون پذیرش قوانین ممکن نیست؛ کد معرف اختیاری است و
+ * اگر نامعتبر باشد بی‌صدا نادیده گرفته می‌شود (ثبت‌نام بدون معرف ادامه می‌یابد).
  */
-export async function createSession(
-  user: UserRow,
+export async function loginWithOtp(
+  phone: string,
+  code: string,
   device: DeviceInput,
   ip?: string | null,
-): Promise<SessionIssue> {
-  // ۱) upsert دستگاه بر اساس (userId, fingerprint)
-  let deviceRow = await db.query.devices.findFirst({
-    where: and(eq(devices.userId, user.id), eq(devices.fingerprint, device.fingerprint)),
-  })
+  opts: LoginOptions = {},
+): Promise<SessionIssue & { isNewUser: boolean }> {
+  await verifyOtp(phone, code)
 
-  if (deviceRow) {
-    await db
-      .update(devices)
-      .set({
-        lastActiveAt: new Date(),
-        revokedAt: null, // اگر قبلاً حذف شده بود، با ورود دوباره فعال می‌شود
-        ...(device.name ? { name: device.name } : {}),
-        ...(device.platform ? { platform: device.platform } : {}),
-        ...(device.userAgent ? { userAgent: device.userAgent } : {}),
-      })
-      .where(eq(devices.id, deviceRow.id))
+  let user = await db.query.users.findFirst({ where: eq(users.phone, phone) })
+  let isNewUser = false
 
-    await db
-      .update(sessions)
-      .set({ revokedAt: new Date(), revokedReason: 'relogin' })
-      .where(and(eq(sessions.deviceId, deviceRow.id), isNull(sessions.revokedAt)))
-  } else {
+  if (!user) {
+    isNewUser = true
+    if (!opts.termsAccepted) {
+      throw Err.validation('پذیرش قوانین برای ثبت‌نام الزامی است.')
+    }
+
+    // معرف — با کد یکتا پیدا می‌شود (خودارجاعی برای کاربر جدید ناممکن است)
+    let referredBy: string | null = null
+    if (opts.refCode) {
+      const refCode = opts.refCode.trim().toUpperCase().slice(0, 16)
+      const referrer = await db.query.users.findFirst({ where: eq(users.referralCode, refCode) })
+      referredBy = referrer?.id ?? null
+    }
+
     const [created] = await db
-      .insert(devices)
+      .insert(users)
       .values({
-        userId: user.id,
-        fingerprint: device.fingerprint,
-        name: device.name ?? 'دستگاه بدون نام',
-        platform: device.platform ?? 'web',
-        userAgent: device.userAgent ?? null,
+        phone,
+        role: isSuperAdmin(phone) ? 'superadmin' : 'user',
+        lastLoginAt: new Date(),
+        referralCode: await generateUniqueReferralCode(),
+        referredBy,
+        termsAcceptedAt: new Date(),
+        termsVersion: opts.termsVersion ?? null,
       })
       .returning()
-    deviceRow = created
-  }
-
-  // ۲) ساخت نشست + refresh token
-  const refreshToken = randomToken(48)
-  const [session] = await db
-    .insert(sessions)
-    .values({
-      userId: user.id,
-      deviceId: deviceRow.id,
-      refreshHash: sha256(refreshToken),
-      ip: ip ?? null,
-      userAgent: device.userAgent ?? null,
-      expiresAt: new Date(Date.now() + SESSION_TTL_SECONDS * 1000),
-    })
-    .returning()
-
-  if (!session) throw Err.internal('ساخت نشست ناموفق بود؛ دوباره وارد شو.')
-
-  const accessToken = await signAccessToken({
-    sub: user.id,
-    dev: deviceRow.id,
-    ses: session.id,
-    tv: user.tokenVersion,
-  })
-
-  return { accessToken, refreshToken, user, session, device: deviceRow }
-}
-
-/**
- * چرخش refresh token:
- *  - توکن درست و فعال → توکن جدید صادر و قدیمی می‌سوزد (rotate)
- *  - توکنی که قبلاً استفاده و rotate شده دوباره ارائه شود → «سرقت» →
- *    کل خانواده‌ی آن نشست (همه‌ی توکن‌های نسل آن) فوراً باطل می‌شود
- */
-export async function rotateSession(
-  refreshToken: string,
-  ip?: string | null,
-): Promise<{ accessToken: string; refreshToken: string; user: UserRow; session: SessionRow }> {
-  const hash = sha256(refreshToken)
-  const row = await db.query.sessions.findFirst({ where: eq(sessions.refreshHash, hash) })
-
-  if (row) {
-    if (row.revokedAt) {
-      throw Err.unauthorized('نشست شما بسته شده است؛ دوباره وارد شوید.')
-    }
-    if (row.expiresAt.getTime() <= Date.now()) {
-      throw Err.unauthorized('نشست شما منقضی شده است؛ دوباره وارد شوید.')
-    }
-
-    const user = await db.query.users.findFirst({ where: eq(users.id, row.userId) })
-    if (!user) throw Err.unauthorized()
+    user = created
+  } else {
     if (user.bannedAt) throw Err.banned()
 
-    const newRefreshToken = randomToken(48)
-
-    // شرط «hash هنوز همان باشد» برای جلوگیری از race بین دو refresh هم‌زمان
-    const [updated] = await db
-      .update(sessions)
-      .set({
-        refreshHash: sha256(newRefreshToken),
-        lastUsedAt: new Date(),
-        rotatedAt: new Date(),
-        ...(ip ? { ip } : {}),
-      })
-      .where(
-        and(
-          eq(sessions.id, row.id),
-          eq(sessions.refreshHash, hash),
-          isNull(sessions.revokedAt),
-        ),
-      )
-      .returning()
-
-    if (!updated) {
-      throw Err.unauthorized('نشست شما بسته شده است؛ دوباره وارد شوید.')
+    const patch: Partial<typeof users.$inferInsert> = { lastLoginAt: new Date() }
+    if (isSuperAdmin(phone) && user.role !== 'superadmin') patch.role = 'superadmin'
+    // کاربر قدیمی که قوانین را نپذیرفته بود و حالا پذیرفت
+    if (opts.termsAccepted && !user.termsAcceptedAt) {
+      patch.termsAcceptedAt = new Date()
+      patch.termsVersion = opts.termsVersion ?? null
     }
 
-    // hash قدیمی را برای پنجره‌ی تشخیص reuse نگه می‌داریم
-    await redis.set(usedRtKey(hash), row.id, 'EX', REUSE_WINDOW_SECONDS)
+    const [updated] = await db
+      .update(users)
+      .set(patch)
+      .where(eq(users.id, user.id))
+      .returning()
+    user = updated
+  }
 
-    const accessToken = await signAccessToken({
-      sub: user.id,
-      dev: row.deviceId,
-      ses: row.id,
-      tv: user.tokenVersion,
+  if (!user) throw Err.internal('ذخیره‌سازی کاربر ناموفق بود؛ دوباره تلاش کن.')
+
+  if (env.deviceEnforcement && !isSuperAdmin(phone)) {
+    const activeDevices = await db.query.devices.findMany({
+      where: and(eq(devices.userId, user.id), isNull(devices.revokedAt)),
     })
-
-    return { accessToken, refreshToken: newRefreshToken, user, session: updated }
+    const isKnownDevice = activeDevices.some((d) => d.fingerprint === device.fingerprint)
+    if (!isKnownDevice && activeDevices.length >= env.maxDevicesPerUser) {
+      throw Err.deviceLimit(env.maxDevicesPerUser)
+    }
   }
 
-  // نشستی با این hash نیست → اگر تا چند دقیقه پیش معتبر بوده، یعنی reuse
-  const reusedSessionId = await redis.get(usedRtKey(hash))
-  if (reusedSessionId) {
-    await db
-      .update(sessions)
-      .set({ revokedAt: new Date(), revokedReason: 'reuse_detected' })
-      .where(eq(sessions.id, reusedSessionId))
-    throw Err.unauthorized(
-      'فعالیت مشکوکی در نشست شما شناسایی شد و نشست بسته شد؛ دوباره وارد شوید.',
-    )
-  }
-
-  throw Err.unauthorized('نشست یافت نشد؛ دوباره وارد شوید.')
+  const issue = await createSession(user, device, ip)
+  return { ...issue, isNewUser }
 }
 
-/** خروج از همین دستگاه */
-export async function revokeSession(
-  sessionId: string,
-  userId: string,
-  reason = 'logout',
-): Promise<void> {
-  await db
-    .update(sessions)
-    .set({ revokedAt: new Date(), revokedReason: reason })
-    .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId), isNull(sessions.revokedAt)))
-}
-
-/**
- * خروج از همه‌ی دستگاه‌ها:
- * همه‌ی نشست‌ها باطل + token_version زیاد می‌شود → همه‌ی access token های
- * در دست جریان هم بلافاصله بی‌اعتبار می‌شوند.
- */
-export async function revokeAllSessions(userId: string, reason = 'logout_all'): Promise<void> {
-  await db
-    .update(sessions)
-    .set({ revokedAt: new Date(), revokedReason: reason })
-    .where(and(eq(sessions.userId, userId), isNull(sessions.revokedAt)))
-
-  await db
-    .update(users)
-    .set({ tokenVersion: sql`${users.tokenVersion} + 1`, updatedAt: new Date() })
-    .where(eq(users.id, userId))
-}
-
-/** حذف یک دستگاه + همه‌ی نشست‌های آن */
-export async function revokeDevice(userId: string, deviceId: string): Promise<boolean> {
-  const device = await db.query.devices.findFirst({
-    where: and(eq(devices.id, deviceId), eq(devices.userId, userId)),
-  })
-  if (!device) return false
-
-  await db.update(devices).set({ revokedAt: new Date() }).where(eq(devices.id, deviceId))
-  await db
-    .update(sessions)
-    .set({ revokedAt: new Date(), revokedReason: 'device_removed' })
-    .where(and(eq(sessions.deviceId, deviceId), isNull(sessions.revokedAt)))
-  return true
-}
-
-/**
- * اعتبارسنجی کامل access token (بعد از چک امضا در guards):
- * کاربر هست؟ بن نیست؟ token_version با دیتابیس می‌خواند؟ نشست هنوز زنده است؟
- */
-export async function validateAccess(ctx: {
-  userId: string
-  sessionId: string
-  tokenVersion: number
-}): Promise<{ user: UserRow; session: SessionRow }> {
-  const user = await db.query.users.findFirst({ where: eq(users.id, ctx.userId) })
+/** پروفایل کاربر + لیست دستگاه‌های فعال (برای صفحه‌ی «دستگاه‌های من») */
+export async function getAccount(userId: string, currentDeviceId: string) {
+  const user = await db.query.users.findFirst({ where: eq(users.id, userId) })
   if (!user) throw Err.unauthorized()
-  if (user.bannedAt) throw Err.banned()
 
-  if (user.tokenVersion !== ctx.tokenVersion) {
-    throw Err.unauthorized('نشست‌های شما بسته شده‌اند؛ دوباره وارد شوید.')
+  const activeDevices = await db.query.devices.findMany({
+    where: and(eq(devices.userId, userId), isNull(devices.revokedAt)),
+    orderBy: [desc(devices.lastActiveAt)],
+  })
+
+  return {
+    user: publicUser(user),
+    devices: activeDevices.map((d) => ({
+      id: d.id,
+      name: d.name,
+      platform: d.platform,
+      lastActiveAt: d.lastActiveAt,
+      createdAt: d.createdAt,
+      current: d.id === currentDeviceId,
+    })),
   }
-
-  const session = await db.query.sessions.findFirst({ where: eq(sessions.id, ctx.sessionId) })
-  if (!session || session.revokedAt || session.expiresAt.getTime() <= Date.now()) {
-    throw Err.unauthorized('نشست شما بسته شده است؛ دوباره وارد شوید.')
-  }
-
-  // به‌روزرسانی lastUsedAt حداکثر یک‌بار در دقیقه (نوشتن در هر درخواست لازم نیست)
-  if (Date.now() - session.lastUsedAt.getTime() > 60_000) {
-    await db.update(sessions).set({ lastUsedAt: new Date() }).where(eq(sessions.id, session.id))
-    await db.update(devices).set({ lastActiveAt: new Date() }).where(eq(devices.id, session.deviceId))
-  }
-
-  return { user, session }
 }

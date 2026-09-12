@@ -34,6 +34,7 @@
     "swiper": "^14.1.0",
     "tailwindcss": "^4.1.18",
     "zod": "^4.4.3",
+    "@elysiajs/eden": "^1.4.9",
     "zustand": "^5.0.15"
   },
   "devDependencies": {
@@ -45,6 +46,9 @@
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.0.1",
     "typescript": "7.0.2",
+    "@types/http-proxy": "^1.17.17",
+    "elysia": "1.4.30",
+    "http-proxy": "^1.18.1",
     "vite": "^8.0.0"
   },
   "pnpm": {

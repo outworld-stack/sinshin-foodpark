@@ -4,7 +4,12 @@ import { useForm } from '@tanstack/react-form'
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { z } from 'zod'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { requestOtp, verifyOtp, checkIsNewUser } from '#/server/auth'
+// ⬅ قرارداد واقعی بک‌اند — Eden treaty تایپ‌سیف (مستقیم از مرورگر، same-origin)
+import { api, unwrap, mapRole, type ApiCallError, type ApiRole } from '#/integrations/api/eden'
+import { currentTermsVersion } from '#/server/terms'
+import { getDeviceInfo } from '#/utils/deviceId'
+
+// پل موقت ادمین۲ — تا مرحله‌ی بک‌اند ادمین (ادمین۲ هنوز سرور ندارد)
 import { checkUserRole, subAdminLogin } from '#/server/admin'
 import { useAuthStore } from '#/stores/authStore'
 import { useToastStore } from '#/stores/toastStore'
@@ -53,34 +58,57 @@ function LoginPage() {
   // --- میوتیشن‌ها: هر مرحله‌ی لاگین یک میوتیشن مستقل ---
   // isPending / isError / error خودشون مدیریت می‌شن — دیگه try/catch + setState نیست
 
-  // ۱) چک سبک — بدون هزینه‌ی پیامک
+  // ۱) چک سبک — POST /api/auth/check (بدون هزینه‌ی پیامک)
   const checkUserMutation = useMutation({
-    mutationFn: (input: string) => checkIsNewUser({ data: { phone: input } }),
+    mutationFn: (input: string) => unwrap(api.auth.check.post({ phone: input })),
   })
 
-  // ۲) ارسال OTP
+  // ۲) ارسال OTP — POST /api/auth/otp/request
   const sendOtpMutation = useMutation({
-    mutationFn: (input: string) => requestOtp({ data: { phone: input } }),
-    onSuccess: () => {
+    mutationFn: (input: string) => unwrap(api.auth.otp.request.post({ phone: input })),
+    onSuccess: (data) => {
       setStep('otp')
-      setResendIn(60)
+      // ⬅ cooldown از سرور (۹۰ ثانیه) — نه عدد هاردکد ۶۰
+      setResendIn(data.cooldownSeconds)
+      // فقط در dev/console — کد آزمایشی در پاسخ برمی‌گردد
+      if (data.devCode) showToast(`کد آزمایشی: ${data.devCode}`)
+    },
+    onError: (error) => {
+      // اگر سرور گفت «کد قبلی هنوز معتبر است»، تایمر را با باقی‌مانده‌ی سرور همگام کن
+      const retry = (error as ApiCallError).retryAfter
+      if (retry && retry > 0) setResendIn(Math.ceil(retry))
     },
   })
 
-  // ۳) تأیید OTP + تشخیص نقش — ارکستراسیون داخل mutationFn
+  // ۳) تأیید OTP — POST /api/auth/otp/verify + پل نقش ادمین۲
   const verifyLoginMutation = useMutation({
     mutationFn: async (input: { phone: string; code: string }) => {
-      await verifyOtp({
-        data: {
-          phone: input.phone,
-          code: input.code,
-          refCode: isNewUser ? refCode : undefined,
-          termsAccepted: isNewUser ? termsAccepted : undefined,   // ⬅ از مرحله‌ی شماره
+      const device = getDeviceInfo()
+      const verify = await unwrap(api.auth.otp.verify.post({
+        phone: input.phone,
+        code: input.code,
+        device: {
+          fingerprint: device.fingerprint,
+          name: device.name,
+          platform: device.platform,
         },
-      })
+        // ⬅ قرارداد ثبت‌نام: کد معرف + پذیرش قوانین + نسخه‌ی قوانین
+        refCode: isNewUser ? refCode : undefined,
+        termsAccepted: termsAccepted || undefined,
+        termsVersion: String(currentTermsVersion()),
+      }))
+
       // ⬅ کش پروفایل قبل از هر ناوبری پاک شه — کاربر جدید/تازه‌وارد
       queryClient.removeQueries({ queryKey: qk.userProfile })
-      return checkUserRole({ data: { phone: input.phone } })
+
+      // نقش از سرور — منبع حقیقت (superadmin → admin مپ می‌شود)
+      let role: 'admin' | 'admin2' | 'user' = mapRole(verify.user.role as ApiRole)
+      // پل موقت: ادمین۲ هنوز بک‌اند ندارد — از موک می‌پرسیم (مرحله‌ی بعد حذف می‌شود)
+      if (role === 'user') {
+        const mock = await checkUserRole({ data: { phone: input.phone } })
+        if (mock.role === 'admin2') role = 'admin2'
+      }
+      return { verify, role }
     },
   })
 
@@ -137,8 +165,9 @@ function LoginPage() {
         const check = await checkUserMutation.mutateAsync(value.phone)
         setIsNewUser(!!check.isNewUser)
 
-        // کاربر جدید و قوانین نپذیرفته؟ → بخش قوانین باز می‌شه، پیامک نمی‌ره
-        if (check.isNewUser && !termsAccepted) {
+        // کاربر جدید (یا قدیمی که هنوز قوانین را نپذیرفته) و قوانین نپذیرفته؟
+        // → بخش قوانین باز می‌شه، پیامک نمی‌ره
+        if ((check.isNewUser || check.needsTerms) && !termsAccepted) {
           setNeedsTerms(true)
           return
         }
@@ -158,23 +187,23 @@ function LoginPage() {
     onSubmit: async ({ value }) => {
       resetMutationErrors()
       try {
-        const roleCheck = await verifyLoginMutation.mutateAsync({ phone, code: value.code })
+        const { verify, role } = await verifyLoginMutation.mutateAsync({ phone, code: value.code })
 
-        if (roleCheck.role === 'admin') {
-          login(true, 'admin')
+        if (role === 'admin') {
+          login(true, 'admin', null, verify.accessToken)
           if (search.redirect) router.history.push(search.redirect)
           else navigate({ to: '/admin', replace: true })
-        } else if (roleCheck.role === 'admin2') {
+        } else if (role === 'admin2') {
           const loginRes = await subAdminLoginMutation.mutateAsync(phone)
-          login(true, 'admin2', loginRes.admin?.id ?? null)
+          login(true, 'admin2', loginRes.admin?.id ?? null, verify.accessToken)
           if (loginRes.drainedOrders && loginRes.drainedOrders > 0) {
             showToast(`${loginRes.drainedOrders} سفارش منتظر از زمان بسته بودن مغازه به شما تحویل شد`)
           }
           if (search.redirect) router.history.push(search.redirect)
           else navigate({ to: '/admin/admin2/live-orders', replace: true })
         } else {
-          login(true, 'user')
-          if (isNewUser) {
+          login(true, 'user', null, verify.accessToken)
+          if (verify.isNewUser) {
             clearStoredRef()
             showToast('ثبت‌نام شما با موفقیت انجام شد! خوش آمدید 🎉')
           }

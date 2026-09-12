@@ -90,6 +90,13 @@ const app = new Elysia()
 const port = Number(process.env.PORT ?? 3000)
 app.listen(port)
 
+
+/**
+ * تایپ کل اپ — برای Eden treaty در فرانت (apps/web) استفاده می‌شود.
+ * فقط type-export است؛ در باندل نهایی هیچ ردی از آن نمی‌ماند.
+ */
+export type App = typeof app
+
 console.log(`[api] ${env.appEnv} │ http://localhost:${port} │ health: /health │ docs: /swagger`)
 
 // ── خاموشی تمیز (docker stop سیگنال SIGTERM می‌فرستد) ──

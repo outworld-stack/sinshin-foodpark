@@ -33,6 +33,25 @@ const OTP_RE = /^\d{4}$/
  */
 export const buildAuthRoutes = () =>
   new Elysia({ prefix: '/auth' })
+    // ── چکِ سبک — قبل از ارسال کد؛ بدون هزینه‌ی پیامک ──
+    // قرارداد فرانت (checkIsNewUser): کاربر جدیده؟ قوانین لازمه؟ نقشش چیه؟
+    .post(
+      '/check',
+      async ({ body }) => {
+        const phone = normalizePhone(body.phone)
+        if (!phone) throw Err.validation('شماره موبایل معتبر نیست.')
+        return auth.checkPhone(phone)
+      },
+      {
+        body: t.Object({ phone: t.String() }),
+        detail: {
+          tags: ['auth'],
+          summary: 'چک کاربر قبل از ارسال کد (بدون پیامک)',
+          description: 'برای گیت قوانین/کد معرف قبل از هزینه‌ی SMS و تشخیص نقش.',
+        },
+      },
+    )
+
     // ── درخواست کد ورود ──
     .post(
       '/otp/request',
@@ -80,6 +99,11 @@ export const buildAuthRoutes = () =>
             userAgent: headers['user-agent'] ?? null,
           },
           ip,
+          {
+            refCode: body.refCode ?? null,
+            termsAccepted: body.termsAccepted ?? false,
+            termsVersion: body.termsVersion ?? null,
+          },
         )
 
         set.headers['set-cookie'] = rtCookie(result.refreshToken)
@@ -87,6 +111,7 @@ export const buildAuthRoutes = () =>
         return {
           accessToken: result.accessToken,
           expiresIn: env.accessTokenTtlMinutes * 60,
+          isNewUser: result.isNewUser,
           user: auth.publicUser(result.user),
           device: { id: result.device.id, name: result.device.name },
         }
@@ -100,6 +125,10 @@ export const buildAuthRoutes = () =>
             name: t.Optional(t.String({ maxLength: 100 })),
             platform: t.Optional(t.String({ maxLength: 20 })),
           }),
+          // ⬅ قرارداد ثبت‌نام فرانت: کد معرف + پذیرش قوانین (فقط کاربر جدید)
+          refCode: t.Optional(t.Nullable(t.String({ maxLength: 20 }))),
+          termsAccepted: t.Optional(t.Boolean()),
+          termsVersion: t.Optional(t.Nullable(t.String({ maxLength: 20 }))),
         }),
         detail: { tags: ['auth'], summary: 'تأیید کد و ورود (refresh در کوکی HttpOnly)' },
       },

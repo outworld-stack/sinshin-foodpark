@@ -6,9 +6,11 @@
     "module": "ESNext",
     "paths": {
       "#/*": ["./src/*"],
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "elysia": ["../api/node_modules/elysia"],
+      "elysia/*": ["../api/node_modules/elysia/*"]
     },
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "ESNext.Disposable"],
     "types": ["vite/client"],
 
     /* Bundler mode */
