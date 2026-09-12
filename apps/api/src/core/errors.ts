@@ -19,6 +19,17 @@ export class AppError extends Error {
     super(message)
     this.name = 'AppError'
   }
+
+  /** شکل استاندارد پاسخ خطا — همان چیزی که onError برمی‌گرداند */
+  toJSON() {
+    return {
+      error: {
+        code: this.code,
+        message: this.message,
+        ...(this.details !== undefined ? { details: this.details } : {}),
+      },
+    }
+  }
 }
 
 export const Err = {
@@ -57,4 +68,7 @@ export const Err = {
 
   banned: (msg = 'حساب کاربری شما مسدود شده است.') =>
     new AppError('BANNED', msg, 403),
+
+  internal: (msg = 'خطای داخلی سرور رخ داده است.', details?: unknown) =>
+    new AppError('INTERNAL_ERROR', msg, 500, details),
 }

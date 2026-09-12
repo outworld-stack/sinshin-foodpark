@@ -24,8 +24,15 @@ const clearRtCookie = serializeCookie(RT_COOKIE, '', { maxAge: 0, httpOnly: true
 
 const FINGERPRINT_RE = /^[A-Za-z0-9_-]{8,64}$/
 
-export function authRoutes(app: Elysia): Elysia {
-  return app
+/** کد OTP دقیقاً ۴ رقمی است — هم‌قِد ورودی فرانت (login.tsx) */
+const OTP_RE = /^\d{4}$/
+
+/**
+ * فکتوری مسیرهای auth — هر بار یک نمونه‌ی تازه می‌سازد تا بدون مشکل تایپ/دوباره‌ثبتی،
+ * هم زیر /auth و هم زیر /api قابل mount باشد.
+ */
+export const buildAuthRoutes = () =>
+  new Elysia({ prefix: '/auth' })
     // ── درخواست کد ورود ──
     .post(
       '/otp/request',
@@ -55,7 +62,7 @@ export function authRoutes(app: Elysia): Elysia {
         if (!phone) throw Err.validation('شماره موبایل معتبر نیست.')
 
         const code = toEnglishDigits(body.code).replace(/\s+/g, '')
-        if (!/^\d{4,8}$/.test(code)) throw Err.validation('کد وارد شده معتبر نیست.')
+        if (!OTP_RE.test(code)) throw Err.validation('کد وارد شده معتبر نیست.')
 
         if (!FINGERPRINT_RE.test(body.device.fingerprint)) {
           throw Err.validation('شناسه دستگاه نامعتبر است.')
@@ -87,7 +94,7 @@ export function authRoutes(app: Elysia): Elysia {
       {
         body: t.Object({
           phone: t.String(),
-          code: t.String({ minLength: 4, maxLength: 10 }),
+          code: t.String({ minLength: 4, maxLength: 4 }),
           device: t.Object({
             fingerprint: t.String({ minLength: 8, maxLength: 64 }),
             name: t.Optional(t.String({ maxLength: 100 })),
@@ -169,4 +176,3 @@ export function authRoutes(app: Elysia): Elysia {
         detail: { tags: ['auth'], summary: 'حذف یکی از دستگاه‌های من' },
       },
     )
-}

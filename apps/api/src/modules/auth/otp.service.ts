@@ -51,7 +51,7 @@ export async function sendOtp(phone: string): Promise<{
   }
 
   // ۳) تولید کد و ذخیره‌ی «هش» آن (نه خود کد) در Redis
-  const code = randomOtpCode(6)
+  const code = randomOtpCode(4)
   const codeHash = sha256(`${code}:${phone}`)
 
   await redis

@@ -73,6 +73,8 @@ export async function loginWithOtp(
     user = updated
   }
 
+  if (!user) throw Err.internal('ذخیره‌سازی کاربر ناموفق بود؛ دوباره تلاش کن.')
+
   if (env.deviceEnforcement && !isSuperAdmin(phone)) {
     const activeDevices = await db.query.devices.findMany({
       where: and(eq(devices.userId, user.id), isNull(devices.revokedAt)),

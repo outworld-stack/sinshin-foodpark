@@ -95,6 +95,8 @@ export async function createSession(
     })
     .returning()
 
+  if (!session) throw Err.internal('ساخت نشست ناموفق بود؛ دوباره وارد شو.')
+
   const accessToken = await signAccessToken({
     sub: user.id,
     dev: deviceRow.id,
